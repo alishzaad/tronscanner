@@ -3,9 +3,8 @@ import hashlib
 import ecdsa
 import requests
 import sys
-import time
 import base58
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from colorama import Fore, Style, init
 import threading
 
@@ -13,7 +12,6 @@ import threading
 init()
 
 # --- TRONGRID API SETTINGS ---
-TRONGRID_API_KEY = "YOUR_API_KEY"  # اختیاری (اگر نیاز بود اضافه کنید)
 TRONGRID_API_URL = "https://api.trongrid.io"
 
 # --- Counter ---
@@ -22,24 +20,23 @@ counter_lock = threading.Lock()
 
 # --- Generate Private Key ---
 def generate_private_key():
-    private_key = os.urandom(32)
-    return private_key.hex() if len(private_key) == 32 else None
+    return os.urandom(32).hex()
 
 # --- Generate Tron Address ---
 def generate_tron_address(private_hex):
-    if private_hex is None:
-        print(f"{Fore.RED}Error generating private key{Style.RESET_ALL}")
+    try:
+        sk = ecdsa.SigningKey.from_string(bytes.fromhex(private_hex), curve=ecdsa.SECP256k1)
+        vk = sk.verifying_key
+        pub_key = b'\x04' + vk.to_string()
+        
+        sha256_hash = hashlib.sha256(pub_key).digest()
+        ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
+        
+        address = '41' + ripemd160_hash.hex()
+        return tron_base58(address)
+    except Exception as e:
+        print(f"{Fore.RED}Error generating Tron address: {e}{Style.RESET_ALL}")
         return None
-
-    sk = ecdsa.SigningKey.from_string(bytes.fromhex(private_hex), curve=ecdsa.SECP256k1)
-    vk = sk.verifying_key
-    pub_key = b'\x04' + vk.to_string()
-    
-    sha256_hash = hashlib.sha256(pub_key).digest()
-    ripemd160_hash = hashlib.new('ripemd160', sha256_hash).digest()
-    
-    address = '41' + ripemd160_hash.hex()
-    return tron_base58(address)
 
 # --- Base58 Conversion ---
 def tron_base58(address_hex):
@@ -64,32 +61,25 @@ def check_tron_balance(address):
             return "Invalid Address"
 
         url = f"{TRONGRID_API_URL}/v1/accounts/{address}"
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json",
-            # "TRON-PRO-API-KEY": TRONGRID_API_KEY  # اگر API Key نیاز بود
-        }
+        headers = {"User-Agent": "Mozilla/5.0"}
         
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
         data = response.json()
 
-        # بررسی اینکه آیا کلید "data" در پاسخ وجود دارد و دارای مقدار معتبر است
         if "data" not in data or not data["data"]:
-            print(f"{Fore.YELLOW}No data found for address: {address}{Style.RESET_ALL}")
-            return 0  # یعنی موجودی 0 TRX
+            return 0  # موجودی 0 TRX
 
-        # استخراج موجودی (موجودی بر حسب SUN است)
         balance_sun = data["data"][0].get("balance", 0)
-        balance_trx = balance_sun / 1_000_000  # تبدیل SUN به TRX
-        
-        return balance_trx
+        return balance_sun / 1_000_000  # تبدیل به TRX
         
     except requests.exceptions.RequestException as e:
-        return f"{Fore.RED}Error: {str(e)}{Style.RESET_ALL}"
+        print(f"{Fore.RED}Request Error: {str(e)}{Style.RESET_ALL}")
+        return "Error"
     except Exception as e:
-        return f"{Fore.RED}Unexpected Error: {str(e)}{Style.RESET_ALL}"
+        print(f"{Fore.RED}Unexpected Error: {str(e)}{Style.RESET_ALL}")
+        return "Error"
 
 # --- Process Address ---
 def process_address():
@@ -124,13 +114,15 @@ def process_address():
 # --- Main Execution ---
 def main():
     try:
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:  # ۱۰ درخواست همزمان
             while True:
-                # 4 درخواست در ثانیه (مطابق محدودیت TronGrid)
-                for _ in range(4):
-                    executor.submit(process_address)
-                time.sleep(1)
-                
+                futures = [executor.submit(process_address) for _ in range(10)]
+                for future in as_completed(futures):
+                    try:
+                        future.result()  # بررسی نتیجه
+                    except Exception as e:
+                        print(f"{Fore.RED}Thread Error: {e}{Style.RESET_ALL}")
+    
     except KeyboardInterrupt:
         print("\nOperation stopped by user")
 
@@ -141,10 +133,10 @@ if __name__ == "__main__":
     ╚══██╔══╝██╔══██╗██╔══██╗████╗░██║
     ░░░██║░░░██████╦╝██║░░██║██╔██╗██║
     ░░░██║░░░██╔══██╗██║░░██║██║╚████║
-    ░░░██║░░░██████╦╝╚█████╔╝██║░╚███║
+    ░░░██║░░░██████╦╝╚█████╔╝██║░░███║
     ░░░╚═╝░░░╚═════╝░░╚════╝░╚═╝░░╚══╝{Style.RESET_ALL}
     
     {Fore.GREEN}TRON Address Scanner [TronGrid]{Style.RESET_ALL}
-    {Fore.BLUE}• Speed: 4 addresses/second{Style.RESET_ALL}
+    {Fore.BLUE}• Speed: 10 addresses/second{Style.RESET_ALL}
     """)
     main()
